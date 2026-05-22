@@ -3,7 +3,7 @@
 //==================================================================
 
 const MODULE_ID = "stars-bonus-stuff";
-const CHAT_SHOWCASE_BUILD = "chat-showcase-2026-05-22-53";
+const CHAT_SHOWCASE_BUILD = "chat-showcase-2026-05-22-54";
 const SHOWCASE_STYLE_ID = `${MODULE_ID}-chat-showcase-styles`;
 
 //==================================================================
@@ -11,7 +11,6 @@ const SHOWCASE_STYLE_ID = `${MODULE_ID}-chat-showcase-styles`;
 //==================================================================
 
 const TOKEN_BAR_LABEL_FONT = "EXCELSIOR SANS";
-// Known pixel widths of the bar assets (PIXI.Texture.from is async; texture.width is 1 until loaded)
 const TOKEN_BAR_ASSET_W = { background: 225, fill: 129 };
 const TOKEN_BAR_ASSET_H = { background: 220, fill: 134 };
 const TOKEN_BAR_LAYER = {
@@ -1024,6 +1023,9 @@ function rerenderActiveCombatLights() {
 }
 
 Hooks.on("canvasReady", rerenderActiveCombatLights);
+Hooks.on("canvasReady", refreshVisibleTokenBars);
+Hooks.on("hoverToken", token => syncCustomBarVisibility(token));
+Hooks.on("controlToken", token => syncCustomBarVisibility(token));
 Hooks.on("createCombatant", rerenderActiveCombatLights);
 Hooks.on("updateCombatant", rerenderActiveCombatLights);
 Hooks.on("deleteCombatant", rerenderActiveCombatLights);
@@ -1044,6 +1046,17 @@ Hooks.on("updateActor", (actor, changes) => {
   if (!game.combat?.active) return;
   if (!changes.system?.light) return;
   rerenderActiveCombatLights();
+});
+
+Hooks.on("updateActor", (actor, changes) => {
+  if (!changes.system?.health && !changes.system?.stagger) return;
+  if (!canvas?.tokens) return;
+
+  for (const token of canvas.tokens.placeables) {
+    if (token.actor?.id === actor.id) {
+      token.drawBars?.();
+    }
+  }
 });
 
 // token updates
