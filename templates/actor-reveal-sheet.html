@@ -1,0 +1,120 @@
+<form class="flexcol sbs-reveal-sheet" autocomplete="off" style="background-image: url('systems/sotc/assets/sheets/sheet_background_two.png'); background-color: gray; color: #efc281;">
+  <div class="sheet-header-top">
+    <div class="name_and_mini">
+      <img class="mini_img" src="{{actor.miniImg}}" alt="{{actor.name}}">
+      <div class="char_name">
+        <div class="sbs-reveal-static-field sbs-reveal-static-field--name">{{actor.name}}</div>
+      </div>
+    </div>
+    <div class="char_role">
+      <div class="sbs-reveal-static-field">{{#if actor.role}}{{actor.role}}{{else}}Revealed Sheet{{/if}}</div>
+    </div>
+  </div>
+
+  <section class="sheet-body sbs-reveal-body">
+    <div class="tab skills {{#if isSkillsTab}}is-active active{{/if}}" data-group="primary" data-tab="skills" data-reveal-panel="skills">
+      <div class="sbs-reveal-showcase-list">
+        {{#each skills}}
+          <article class="sbs-reveal-showcase-entry{{#if isEgo}} sbs-reveal-showcase-entry--ego{{/if}}">
+            {{#if isEgo}}
+              {{#if hasRisk}}
+                <div class="sbs-reveal-risk-line">{{risk}}</div>
+              {{/if}}
+            {{/if}}
+            {{{showcaseHTML}}}
+
+            {{#if isEgo}}
+              {{#if passiveName}}
+                <div class="sbs-reveal-ego-extra">
+                  <div class="sbs-reveal-block">
+                    <div class="sbs-reveal-copy-label">Passive</div>
+                    <div class="sbs-reveal-passive-name">{{passiveName}}</div>
+                    {{#if passiveHTML}}
+                      <div class="sbs-reveal-richtext">{{{passiveHTML}}}</div>
+                    {{/if}}
+                  </div>
+                </div>
+              {{else}}
+                {{#if passiveHTML}}
+                  <div class="sbs-reveal-ego-extra">
+                    <div class="sbs-reveal-block">
+                      <div class="sbs-reveal-copy-label">Passive</div>
+                      <div class="sbs-reveal-richtext">{{{passiveHTML}}}</div>
+                    </div>
+                  </div>
+                {{/if}}
+              {{/if}}
+            {{/if}}
+          </article>
+        {{else}}
+          <p class="sbs-reveal-empty">No revealed skills or EGO to show.</p>
+        {{/each}}
+      </div>
+    </div>
+
+    <div class="tab passives {{#if isPassivesTab}}is-active active{{/if}}" data-group="primary" data-tab="passives" data-reveal-panel="passives">
+      <div class="sheet_passives sbs-reveal-passive-list">
+        {{#each passives}}
+          <article class="passive_card sbs-reveal-passive-card">
+            <div class="passive_left">
+              <h4 class="passive_name" style="font-size: 16px; color: inherit; font-weight: bold; text-shadow: black 1px 0 10px, black 1px 0 10px;">{{name}}</h4>
+              <div class="sbs-reveal-passive-tag">Passive</div>
+            </div>
+            <div class="passive_right sbs-reveal-richtext">
+              {{#if detailsHTML}}
+                {{{detailsHTML}}}
+              {{/if}}
+            </div>
+          </article>
+          {{#unless @last}}
+            <hr class="sbs-reveal-divider">
+          {{/unless}}
+        {{else}}
+          <p class="sbs-reveal-empty">No passives to show.</p>
+        {{/each}}
+      </div>
+    </div>
+
+    <div class="tab biography {{#if isBiographyTab}}is-active active{{/if}}" data-group="primary" data-tab="biography" data-reveal-panel="biography">
+      <div class="sbs-reveal-biography-panel">
+        {{#if biography.hasBiographyText}}
+          <div class="sbs-reveal-block sbs-reveal-biography-copy">
+            <div class="sbs-reveal-copy-label">Biography</div>
+            <div class="sbs-reveal-richtext">
+              {{{biography.biographyHTML}}}
+            </div>
+          </div>
+        {{/if}}
+
+        <div class="sheet_passives sbs-reveal-passive-list sbs-reveal-biography-entries">
+          {{#each biography.entries}}
+            <article class="passive_card sbs-reveal-passive-card">
+              <div class="passive_left">
+                <h4 class="passive_name" style="font-size: 16px; color: inherit; font-weight: bold; text-shadow: black 1px 0 10px, black 1px 0 10px;">{{name}}</h4>
+                <div class="sbs-reveal-passive-tag">Biography Entry</div>
+              </div>
+              <div class="passive_right sbs-reveal-richtext">
+                {{#if detailsHTML}}
+                  {{{detailsHTML}}}
+                {{/if}}
+              </div>
+            </article>
+            {{#unless @last}}
+              <hr class="sbs-reveal-divider">
+            {{/unless}}
+          {{else}}
+            {{#unless ../biography.hasBiographyText}}
+              <p class="sbs-reveal-empty">No biography to show.</p>
+            {{/unless}}
+          {{/each}}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <nav class="sheet-tabs tabs" data-group="primary" aria-label="Revealed actor tabs" style="color: #efc281;">
+    <a class="item {{#if isSkillsTab}}is-active active{{/if}}" data-reveal-tab="skills">Skills</a>
+    <a class="item {{#if isPassivesTab}}is-active active{{/if}}" data-reveal-tab="passives">Passives</a>
+    <a class="item {{#if isBiographyTab}}is-active active{{/if}}" data-reveal-tab="biography">Biography</a>
+  </nav>
+</form>

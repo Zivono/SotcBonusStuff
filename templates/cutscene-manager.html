@@ -1,0 +1,94 @@
+<section class="sbs-cutscene-manager">
+  <aside class="sbs-cutscene-sidebar">
+    <div class="sbs-cutscene-sidebar-header">
+      <h1 class="sbs-cutscene-heading">Cutscenes</h1>
+      <button type="button" class="sbs-cutscene-button" data-action="create-cutscene">New</button>
+    </div>
+
+    {{#if activeCutsceneName}}
+    <div class="sbs-cutscene-status">Active: {{activeCutsceneName}}</div>
+    {{/if}}
+
+    <div class="sbs-cutscene-library">
+      {{#if hasCutscenes}}
+        {{#each cutscenes}}
+        <button
+          type="button"
+          class="sbs-cutscene-list-item{{#if isSelected}} is-selected{{/if}}{{#if isActive}} is-active{{/if}}"
+          data-action="select-cutscene"
+          data-cutscene-id="{{id}}"
+        >
+          <span class="sbs-cutscene-list-name">{{name}}</span>
+          <span class="sbs-cutscene-list-meta">{{slideCountLabel}}</span>
+        </button>
+        {{/each}}
+      {{else}}
+      <div class="sbs-cutscene-empty">
+        Create a cutscene, then add slides from the Foundry file host.
+      </div>
+      {{/if}}
+    </div>
+  </aside>
+
+  <section class="sbs-cutscene-editor">
+    {{#if hasSelectedCutscene}}
+    <div class="sbs-cutscene-editor-header">
+      <div class="sbs-cutscene-name-field">
+        <div class="sbs-cutscene-field-label">Cutscene Name</div>
+        <input type="text" name="cutscene-name" value="{{selectedCutscene.name}}" placeholder="Untitled Cutscene">
+      </div>
+
+      <div class="sbs-cutscene-name-field sbs-cutscene-scale-field">
+        <div class="sbs-cutscene-field-label">Scale</div>
+        <input type="number" name="cutscene-scale" value="{{selectedCutscene.scale}}" min="1" max="3" step="0.05">
+      </div>
+
+      <div class="sbs-cutscene-editor-actions">
+        <button type="button" class="sbs-cutscene-button" data-action="play-cutscene">Play</button>
+        <button type="button" class="sbs-cutscene-button" data-action="stop-cutscene">End</button>
+        <button type="button" class="sbs-cutscene-button" data-action="delete-cutscene">Delete</button>
+      </div>
+    </div>
+
+    <div class="sbs-cutscene-slide-toolbar">
+      <h2 class="sbs-cutscene-editor-heading">Slides</h2>
+      <div class="sbs-cutscene-editor-actions">
+        <div class="sbs-cutscene-caption">{{selectedCutscene.slideCountLabel}}</div>
+        <button type="button" class="sbs-cutscene-button" data-action="add-slide">Add Image</button>
+      </div>
+    </div>
+
+    <div class="sbs-cutscene-slide-list">
+      {{#if selectedCutscene.hasSlides}}
+        {{#each selectedCutscene.slides}}
+        <article class="sbs-cutscene-slide-card">
+          <div class="sbs-cutscene-slide-preview">
+            <img src="{{path}}" alt="Slide {{displayIndex}}">
+          </div>
+
+          <div class="sbs-cutscene-slide-body">
+            <div class="sbs-cutscene-slide-title">Slide {{displayIndex}}</div>
+            <div class="sbs-cutscene-path">{{path}}</div>
+
+            <div class="sbs-cutscene-slide-actions">
+              <button type="button" class="sbs-cutscene-button" data-action="change-slide-image" data-slide-id="{{id}}">Change Image</button>
+              <button type="button" class="sbs-cutscene-button" data-action="move-slide-up" data-slide-id="{{id}}" {{#unless canMoveUp}}disabled{{/unless}}>Move Up</button>
+              <button type="button" class="sbs-cutscene-button" data-action="move-slide-down" data-slide-id="{{id}}" {{#unless canMoveDown}}disabled{{/unless}}>Move Down</button>
+              <button type="button" class="sbs-cutscene-button" data-action="remove-slide" data-slide-id="{{id}}">Remove</button>
+            </div>
+          </div>
+        </article>
+        {{/each}}
+      {{else}}
+      <div class="sbs-cutscene-empty">
+        Add one or more images to build the slideshow for this cutscene.
+      </div>
+      {{/if}}
+    </div>
+    {{else}}
+    <div class="sbs-cutscene-empty">
+      Create a cutscene from the library on the left to start building a slideshow.
+    </div>
+    {{/if}}
+  </section>
+</section>
