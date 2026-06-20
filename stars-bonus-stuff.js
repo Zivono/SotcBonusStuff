@@ -11,6 +11,8 @@ const CUTSCENE_MANAGER_TEMPLATE_PATH = "modules/stars-bonus-stuff/templates/cuts
 const ACTOR_REVEAL_FALLBACK_IMG = "systems/sotc/assets/Raw Ruina Assets/Pages/default skill icon.png";
 const ACTOR_REVEAL_ITEM_FLAG = "revealedToOthers";
 const ACTOR_REVEAL_MASK_TEXT = "?????";
+const ROLL_DIALOG_CHARGE_ICON_PATH = "systems/sotc/assets/statuses/Charge.png";
+const SKILL_ROLL_DIALOG_CONTEXT_TTL_MS = 10000;
 const STATUS_ICON_TOKEN_PATTERN = /\{\s*(?:"([^"]+)"|'([^']+)'|([^{}]+))\s*\}/g;
 const STATUS_ICON_ASSET_BASE = "systems/sotc/assets/statuses";
 const STATUS_ICON_ASSET_FALLBACK = `${STATUS_ICON_ASSET_BASE}/Default.png`;
@@ -46,6 +48,7 @@ let cutsceneManagerApp = null;
 let activeCutsceneState = null;
 let cutsceneOverlayRoot = null;
 let chatShowcasePreviewRoot = null;
+const pendingSkillRollDialogContexts = [];
 
 //==================================================================
 // hp / stagger bar 
@@ -63,11 +66,11 @@ const TOKEN_BAR_LAYER = {
   label: 984
 };
 const TOKEN_BAR_FILL_ANIMATION = {
-  strength: 0.1,
-  coarseScaleX: 6.4,
-  coarseScaleY: 4.6,
-  fineScaleX: 18,
-  fineScaleY: 14,
+  strength: 0.23,
+  coarseScaleX: 10,
+  coarseScaleY: 6.5,
+  fineScaleX: 28,
+  fineScaleY: 20,
   primarySpeed: 0.3,
   secondarySpeed: 1
 };
@@ -84,14 +87,15 @@ const BAR_TEXTURE_PATHS = {
   tokenBarRevealStagger: "modules/stars-bonus-stuff/img/revealS.webp"
 };
 const TOKEN_BAR_GEOMETRY = {
-  backgroundScale: 1.4,
+  backgroundScale: 1.45,
   backgroundOffsetY: 0.02,
   backgroundMaskLift: 0.078,
-  overlayLiftY: 0.14,
+  overlayLiftY: 0.36, // 0.36 for 7 ploygon token 0.25 for cirlce
+  backgroundHorizontalStretch: 1,
   fillOffsetX: 0.23,
   fillScaleX: 0.98,
   fillScaleY: 0.96,
-  fillY: 0.21,
+  fillY: 0.217,
   labelOffsetX: 0.52,
   labelY: -0.14
 };
@@ -175,6 +179,7 @@ Hooks.once("ready", () => {
   globalThis.__SBS_CHAT_SHOWCASE_BUILD = CHAT_SHOWCASE_BUILD;
   injectShowcaseStyles();
   primeStatusIconPackLookup();
+  installSkillRollDialogContextCapture();
   installCustomTokenBars();
   installCutsceneSocket();
   Promise.all([preloadCustomBarTextures(), ensureCustomFontLoaded()]).then(() => refreshVisibleTokenBars());
@@ -1177,6 +1182,845 @@ function scheduleSkillStatusDecoration(app, html) {
     const root = getRenderedHtmlRoot(html);
     if (!root?.isConnected) return;
     decorateSkillStatusTokens(app, html);
+  });
+}
+
+function getSkillRollDialogSheetClasses() {
+  const sheetClasses = CONFIG.Actor?.sheetClasses?.character ?? {};
+  const classes = [];
+  const seen = new Set();
+
+  for (const namespaceEntry of Object.values(sheetClasses)) {
+    for (const sheetEntry of Object.values(namespaceEntry ?? {})) {
+      const cls = sheetEntry?.cls ?? sheetEntry;
+      if (!cls || seen.has(cls)) continue;
+      seen.add(cls);
+
+      if (typeof cls?.prototype?._onRollFullSkill === "function") {
+        classes.push(cls);
+      }
+    }
+  }
+
+  return classes;
+}
+
+function queuePendingSkillRollDialogContext(actor, item) {
+  if (!actor?.id || !item?.id) return;
+
+  pendingSkillRollDialogContexts.push({
+    actorId: actor.id,
+    itemId: item.id,
+    itemName: String(item.name ?? "").trim(),
+    expiresAt: Date.now() + SKILL_ROLL_DIALOG_CONTEXT_TTL_MS
+  });
+
+  while (pendingSkillRollDialogContexts.length > 12) {
+    pendingSkillRollDialogContexts.shift();
+  }
+}
+
+function consumePendingSkillRollDialogContext(app) {
+  const now = Date.now();
+  const dialogTitle = String(app?.title ?? app?.options?.title ?? "").trim();
+
+  for (let index = pendingSkillRollDialogContexts.length - 1; index >= 0; index -= 1) {
+    if (Number(pendingSkillRollDialogContexts[index]?.expiresAt ?? 0) < now) {
+      pendingSkillRollDialogContexts.splice(index, 1);
+    }
+  }
+
+  if (!pendingSkillRollDialogContexts.length) return null;
+
+  const exactMatchIndex = pendingSkillRollDialogContexts.findIndex(context => dialogTitle === `Roll Skill: ${context.itemName}`);
+  const contextIndex = exactMatchIndex >= 0 ? exactMatchIndex : 0;
+  const [context] = pendingSkillRollDialogContexts.splice(contextIndex, 1);
+  return context ?? null;
+}
+
+function getSkillRollDialogContainer(app, html) {
+  const root = getRenderedHtmlRoot(html);
+  const appElement = app?.element;
+
+  if (appElement instanceof HTMLElement) return appElement;
+  if (appElement?.[0] instanceof HTMLElement) return appElement[0];
+  return root?.closest?.(".dialog, .app.dialog") ?? root ?? null;
+}
+
+function attachSkillRollDialogContext(app, html) {
+  const container = getSkillRollDialogContainer(app, html);
+  if (!container) return null;
+
+  const actorId = String(container.dataset.sbsActorId ?? "").trim();
+  const itemId = String(container.dataset.sbsItemId ?? "").trim();
+  if (actorId && itemId) {
+    return { actorId, itemId };
+  }
+
+  const context = consumePendingSkillRollDialogContext(app);
+  if (!context) return null;
+
+  container.dataset.sbsActorId = context.actorId;
+  container.dataset.sbsItemId = context.itemId;
+  return context;
+}
+
+function resolveSkillRollDialogContext(app, html) {
+  const root = getRenderedHtmlRoot(html);
+  const container = getSkillRollDialogContainer(app, html);
+  if (!root || !container) return { root: null, container: null, actor: null, item: null };
+
+  attachSkillRollDialogContext(app, html);
+
+  const actorId = String(container.dataset.sbsActorId ?? "").trim();
+  const itemId = String(container.dataset.sbsItemId ?? "").trim();
+  const actor = actorId ? game.actors?.get(actorId) ?? null : null;
+  const item = actor && itemId ? actor.items?.get(itemId) ?? null : null;
+  return { root, container, actor, item };
+}
+
+function captureSkillRollDialogContextFromActorSheet(app, html) {
+  const root = getRenderedHtmlRoot(html);
+  const actor = app?.actor ?? null;
+  if (!root || !actor?.items) return;
+  if (root.dataset.sbsChargeContextCaptureBound === "true") return;
+
+  root.dataset.sbsChargeContextCaptureBound = "true";
+  root.addEventListener("click", event => {
+    const button = event.target instanceof Element ? event.target.closest(".skill_roll-button") : null;
+    if (!button || !root.contains(button)) return;
+
+    const card = button.closest(".skill_card");
+    const itemId = String(card?.dataset?.itemId ?? "").trim();
+    const item = itemId ? actor.items.get(itemId) ?? null : null;
+    if (!item) return;
+
+    queuePendingSkillRollDialogContext(actor, item);
+  }, true);
+}
+
+function normalizeStatusLookupName(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function getActorChargeStatusItem(actor) {
+  if (!actor?.items) return null;
+
+  const statuses = actor.items.filter(item => item.type === "status");
+  const namedMatch = statuses.find(item => normalizeStatusLookupName(item.name) === "charge");
+  if (namedMatch) return namedMatch;
+
+  const partialNameMatch = statuses.find(item => /\bcharge\b/i.test(String(item.name ?? "")));
+  if (partialNameMatch) return partialNameMatch;
+
+  return statuses.find(item => {
+    const imagePath = String(item.img ?? "").replace(/\\/g, "/").toLowerCase();
+    return imagePath.includes("charge") && imagePath.endsWith(".png");
+  }) ?? null;
+}
+
+function getActorChargeCount(actor) {
+  const chargeItem = getActorChargeStatusItem(actor);
+  return Math.max(0, Number(chargeItem?.system?.count ?? 0));
+}
+
+async function consumeActorCharge(actor, amount) {
+  const spend = Math.max(0, Number(amount ?? 0));
+  if (!actor || spend <= 0) return 0;
+
+  const chargeItem = getActorChargeStatusItem(actor);
+  if (!chargeItem) return 0;
+
+  const currentCount = Math.max(0, Number(chargeItem.system?.count ?? 0));
+  if (currentCount <= 0) return 0;
+
+  const nextCount = Math.max(currentCount - spend, 0);
+  if (nextCount === currentCount) return 0;
+
+  await chargeItem.update({ "system.count": nextCount });
+  return currentCount - nextCount;
+}
+
+function getSkillRollDialogDice(item) {
+  const diceObject = item?.system?.dice?.die ?? {};
+  return Array.isArray(diceObject) ? diceObject : Object.values(diceObject);
+}
+
+function parseSkillRollDieFormula(formula) {
+  const match = String(formula ?? "").match(/^\s*(\d+)\s*d\s*(\d+)((?:\s*[+-]\s*\d+)*)\s*$/);
+  if (!match) return null;
+
+  const numDice = parseInt(match[1], 10);
+  const dieSize = parseInt(match[2], 10);
+  const modifierString = match[3] || "";
+  const baseMod = modifierString
+    .replace(/\s+/g, "")
+    .split(/(?=[+-])/)
+    .filter(part => part.length)
+    .reduce((sum, part) => sum + parseInt(part, 10), 0);
+
+  return { numDice, dieSize, baseMod };
+}
+
+function getSkillDieStatusModifier(actor, dieType) {
+  const modifiers = actor?.system?.modifiers ?? {};
+  let statusMod = Number(modifiers.all_mod ?? 0);
+
+  if (["slash", "pierce", "blunt", "counter-slash", "counter-pierce", "counter-blunt"].includes(dieType)) {
+    statusMod += Number(modifiers.off_mod ?? 0);
+  }
+  if (["block", "evade", "counter-block", "counter-evade"].includes(dieType)) {
+    statusMod += Number(modifiers.def_mod ?? 0);
+  }
+  if (["slash", "counter-slash"].includes(dieType)) {
+    statusMod += Number(modifiers.slash_mod ?? 0);
+  }
+  else if (["pierce", "counter-pierce"].includes(dieType)) {
+    statusMod += Number(modifiers.pierce_mod ?? 0);
+  }
+  else if (["blunt", "counter-blunt"].includes(dieType)) {
+    statusMod += Number(modifiers.blunt_mod ?? 0);
+  }
+  else if (["block", "counter-block"].includes(dieType)) {
+    statusMod += Number(modifiers.block_mod ?? 0);
+  }
+  else if (["evade", "counter-evade"].includes(dieType)) {
+    statusMod += Number(modifiers.evade_mod ?? 0);
+  }
+
+  return statusMod;
+}
+
+function buildSkillRollModifierDisplay(mod, statusMod) {
+  let display = "";
+
+  if (mod > 0) {
+    display += ` + ${mod}`;
+  } else if (mod < 0) {
+    display += ` - ${-mod}`;
+  }
+
+  if (statusMod > 0) {
+    display += ` + ${statusMod}`;
+  } else if (statusMod < 0) {
+    display += ` - ${-statusMod}`;
+  }
+
+  return display;
+}
+
+function buildSkillRollFormulaDisplay({ numDice, dieSize, baseMod, mod, statusMod, roll, paralysis, poise, chargeTotals }) {
+  const modifierDisplay = `${buildSkillRollModifierDisplay(mod, statusMod)} = ${roll.total}`;
+
+  if (paralysis) {
+    return `<div style="display: flex;"><img src="systems/sotc/assets/statuses/Paralyze.png" title="Paralyze" style="height: 20px; width: 20px; vertical-align: middle; margin-right: 3px; border: none; filter: drop-shadow(1px 1px 2px black)">(${numDice}d${dieSize}) + ${baseMod}${modifierDisplay}</div>`;
+  }
+
+  if (poise) {
+    return `<div style="display: flex;"><img src="systems/sotc/assets/statuses/Poise.png" title="Poise" style="height: 20px; width: 20px; vertical-align: middle; margin-right: 3px; border: none; filter: drop-shadow(1px 1px 2px black)">(${numDice}d${dieSize}) + ${baseMod}${modifierDisplay}</div>`;
+  }
+
+  if (Array.isArray(chargeTotals) && chargeTotals.length === 2) {
+    return `<div style="display: flex;"><img src="${ROLL_DIALOG_CHARGE_ICON_PATH}" title="Charge" style="height: 20px; width: 20px; vertical-align: middle; margin-right: 3px; border: none; filter: drop-shadow(1px 1px 2px black)">${numDice}d${dieSize}(${chargeTotals[0]}, ${chargeTotals[1]}) + ${baseMod}${modifierDisplay}</div>`;
+  }
+
+  return `${numDice}d${dieSize} + ${baseMod}${modifierDisplay}`;
+}
+
+function buildSkillDieModuleLine(modules) {
+  if (!modules.length) return "";
+  return `<div style="margin-top: 4px; font-size: 12px;"><em>${modules.map(moduleText => `<div style="margin-left: 5px;">• ${moduleText}</div>`).join("")}</em></div>`;
+}
+
+function buildSkillDiePayload(actor, item, die) {
+  return {
+    dieType: die.type,
+    actorId: actor.id,
+    itemId: item.id,
+    itemName: item.name,
+    isOffensive: ["slash", "pierce", "blunt", "counter-slash", "counter-pierce", "counter-blunt"].includes(die.type),
+    isDefensive: ["block", "evade", "counter-block", "counter-evade"].includes(die.type)
+  };
+}
+
+async function rollSkillDialogDie({ actor, die, input, availableCharge }) {
+  const index = String(input?.dataset?.dieIndex ?? "").trim();
+  const mod = parseInt(input?.querySelector(`input[name="mod-${index}"]`)?.value, 10) || 0;
+  const paralysis = Boolean(input?.querySelector(`input[name="paralysis-${index}"]`)?.checked);
+  const poise = Boolean(input?.querySelector(`input[name="poise-${index}"]`)?.checked);
+  const wantsCharge = Boolean(input?.querySelector(`input[name="charge-${index}"]`)?.checked);
+
+  const parsedFormula = parseSkillRollDieFormula(die?.formula);
+  if (!parsedFormula) {
+    return {
+      die,
+      isError: true,
+      message: `Invalid formula: <code>${escapeHtml(die?.formula ?? "")}</code>. Must be of the format XdY+Z`
+    };
+  }
+
+  const { numDice, dieSize, baseMod } = parsedFormula;
+  const statusMod = getSkillDieStatusModifier(actor, die?.type);
+  const standardFormula = `${numDice}d${dieSize} + ${baseMod} + ${mod} + ${statusMod}`;
+  let roll;
+  let chargeTotals = null;
+  let usedCharge = false;
+
+  if (paralysis) {
+    const total = numDice + baseMod + mod + statusMod;
+    roll = await new Roll(`${total}`).roll({ async: true });
+  } else if (poise) {
+    const total = numDice * dieSize + baseMod + mod + statusMod;
+    roll = await new Roll(`${total}`).roll({ async: true });
+  } else if (wantsCharge && availableCharge > 0) {
+    const firstRoll = await new Roll(standardFormula).roll({ async: true });
+    const secondRoll = await new Roll(standardFormula).roll({ async: true });
+    const totalModifier = baseMod + mod + statusMod;
+    chargeTotals = [firstRoll.total - totalModifier, secondRoll.total - totalModifier];
+    roll = firstRoll.total >= secondRoll.total ? firstRoll : secondRoll;
+    usedCharge = true;
+  } else {
+    roll = await new Roll(standardFormula).roll({ async: true });
+  }
+
+  return {
+    die,
+    roll,
+    formulaForDisplay: buildSkillRollFormulaDisplay({
+      numDice,
+      dieSize,
+      baseMod,
+      mod,
+      statusMod,
+      roll,
+      paralysis,
+      poise,
+      chargeTotals
+    }),
+    mod,
+    status_mod: statusMod,
+    usedCharge,
+    input,
+    chargeInput: input?.querySelector(`input[name="charge-${index}"]`) ?? null,
+    chargeIcon: input?.querySelector(`.toggle_icon[data-type="charge"][data-index="${index}"]`) ?? null
+  };
+}
+
+async function applySkillRollResourceCosts(actor, item) {
+  if (!actor || !item) return;
+
+  const updates = {};
+
+  const lightCost = Number(item.system?.light_cost ?? 0);
+  if (lightCost > 0) {
+    const currentLight = Number(foundry.utils.getProperty(actor.system, "light.value") ?? 0);
+    updates["system.light.value"] = Math.max(currentLight - lightCost, 0);
+  }
+
+  const emotionCost = Number(item.system?.emotion_cost ?? 0);
+  if (emotionCost > 0) {
+    const currentEmotion = Number(foundry.utils.getProperty(actor.system, "emotion") ?? 0);
+    updates["system.emotion"] = Math.max(currentEmotion - emotionCost, 0);
+  }
+
+  const maxUses = Number(item.system?.limit?.max ?? 0);
+  if (maxUses > 0) {
+    const currentUses = Number(item.system?.limit?.value ?? maxUses);
+    await item.update({ "system.limit.value": Math.max(currentUses - 1, 0) });
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await actor.update(updates);
+  }
+}
+
+async function createSkillRollDeclarationMessage(actor, item) {
+  const dice = getSkillRollDialogDice(item);
+  const skillModules = item.system?.skill_modules?.mods;
+  const lightCost = item.system?.light_cost;
+  const lightCostLine = `<p><strong>Light Cost:</strong> ${lightCost}</p>`;
+  const weight = item.system?.weight;
+  const weightLine = weight > 1 ? `<p><strong>Attack Weight:</strong> ${weight}</p>` : "";
+  const skillModulesLine = skillModules ? `<div class="skill-modules" style="white-space: pre-wrap;">${skillModules}</div>` : "";
+
+  const diceSummaries = dice.map(die => {
+    const icon = `systems/sotc/assets/dice types/${die.type}.png`;
+    const colorClass = `die-color-${die.type}`;
+    const formula = die.formula;
+    const modules = Object.values(die.mods ?? {});
+    const moduleLine = buildSkillDieModuleLine(modules);
+
+    return `
+      <div style="margin-bottom: 5px;">
+        <span class="${colorClass}" style="vertical-align: middle; font-size: 16px; text-shadow: black 0.5px 0.5px">
+          <div style="display: flex; gap: 4px;">
+            <img src="${icon}" alt="${escapeHtml(die.type)}" title="${escapeHtml(die.type)}" style="height: 30px; width: 30px; vertical-align: middle; border: none;">
+            <strong style="margin-top: 4px;">${escapeHtml(formula)}</strong>
+          </div>
+        </span>
+        ${moduleLine}
+      </div>
+    `;
+  }).join("");
+
+  const messageContent = `
+    <div class="skill-declaration">
+      <h3>${escapeHtml(item.name)}</h3>
+      ${lightCostLine}
+      ${weightLine}
+      ${skillModulesLine}
+      <p><strong>Dice:</strong></p>
+      ${diceSummaries}
+    </div>
+  `;
+
+  await ChatMessage.create({
+    speaker: ChatMessage.getSpeaker({ actor }),
+    content: messageContent,
+    type: CONST.CHAT_MESSAGE_TYPES.OTHER
+  });
+}
+
+function bindPatchedSkillRollDialogRoot(root, actor, item) {
+  if (!root || root.dataset.sbsPatchedSkillRollDialogBound === "true") return;
+  root.dataset.sbsPatchedSkillRollDialogBound = "true";
+
+  decorateSkillRollDialogChargeToggle(root);
+
+  root.querySelectorAll('.toggle_icon[data-type="paralysis"], .toggle_icon[data-type="poise"]').forEach(icon => {
+    icon.addEventListener("click", () => {
+      const index = icon.dataset.index;
+      const type = icon.dataset.type;
+      const otherType = type === "paralysis" ? "poise" : "paralysis";
+
+      const currentIcon = icon;
+      const otherIcon = root.querySelector(`.toggle_icon[data-type="${otherType}"][data-index="${index}"]`);
+      const currentInput = root.querySelector(`input[name="${type}-${index}"]`);
+      const otherInput = root.querySelector(`input[name="${otherType}-${index}"]`);
+      if (!currentInput || !otherInput) return;
+
+      const isSelected = currentInput.checked;
+
+      currentInput.checked = false;
+      otherInput.checked = false;
+      currentIcon.classList.remove("selected");
+      otherIcon?.classList.remove("selected");
+
+      if (!isSelected) {
+        currentInput.checked = true;
+        currentIcon.classList.add("selected");
+      }
+    });
+  });
+
+  root.querySelectorAll(".dialog_individual_roll-button").forEach(button => {
+    button.addEventListener("click", event => {
+      event.preventDefault();
+      const index = parseInt(button.dataset.index ?? "", 10);
+      if (Number.isNaN(index)) return;
+      void handleSkillRollDialogIndividualRoll(root, actor, item, index);
+    });
+  });
+}
+
+async function openPatchedSkillRollDialog(actor, item) {
+  const diceArray = getSkillRollDialogDice(item);
+  if (!diceArray.length) {
+    return ui.notifications.warn("WHAT ARE YOU DOING!!! Your skill has no dice array!!! How'd you even manage that!!! Tell me about it...");
+  }
+
+  const dialogContent = await renderTemplate("systems/sotc/templates/skill-roll-dialog.html", {
+    dice: diceArray
+  });
+
+  let dialog = null;
+  dialog = new Dialog({
+    title: `Roll Skill: ${item.name}`,
+    content: dialogContent,
+    buttons: {
+      declare: {
+        icon: '<i class="fas fa-exclamation-circle"></i>',
+        label: "Reveal",
+        callback: async () => {
+          await createSkillRollDeclarationMessage(actor, item);
+        }
+      },
+      roll: {
+        icon: '<i class="fas fa-dice"></i>',
+        label: "Roll",
+        callback: async html => {
+          const root = getRenderedHtmlRoot(html);
+          if (!root) return;
+          await handleSkillRollDialogFullRoll(dialog, root, actor, item);
+        }
+      },
+      cancel: {
+        icon: '<i class="fas fa-times"></i>',
+        label: "Cancel"
+      }
+    },
+    default: "declare",
+    render: html => {
+      const root = getRenderedHtmlRoot(html);
+      if (!root) return;
+      bindPatchedSkillRollDialogRoot(root, actor, item);
+    }
+  }, {
+    classes: ["sotc_skill_roll_dialog"]
+  });
+
+  dialog._sbsHandledChargeRollDialog = true;
+  dialog.render(true);
+  return dialog;
+}
+
+async function createSkillRollSummaryChatMessage(actor, item, results) {
+  const skillModules = item.system?.skill_modules?.mods;
+  const lightCost = item.system?.light_cost;
+  const lightCostLine = `<p><strong>Light Cost:</strong> ${lightCost}</p>`;
+  const weight = item.system?.weight;
+  const weightLine = weight > 1 ? `<p><strong>Attack Weight:</strong> ${weight}</p>` : "";
+  const skillModulesLine = skillModules ? `<div class="skill-modules" style="white-space: pre-wrap;">${skillModules}</div>` : "";
+
+  const diceSummaries = results.map(result => {
+    if (result?.isError) {
+      return `<div style="margin-bottom: 5px;"><strong>Error:</strong> ${result.message}</div>`;
+    }
+
+    const { die, roll, formulaForDisplay, mod, status_mod: statusMod } = result;
+    const icon = `systems/sotc/assets/dice types/${die.type}.png`;
+    const colorClass = `die-color-${die.type}`;
+    const modules = Object.values(die.mods ?? {});
+    const moduleLine = buildSkillDieModuleLine(modules);
+    const payload = buildSkillDiePayload(actor, item, die);
+    payload.total = roll.total;
+
+    return `
+      <div style="margin-bottom: 5px;">
+        <span class="${colorClass}" style="vertical-align: middle; font-size: 16px;">
+          <div style="display: flex; gap: 4px;">
+            <img src="${icon}" alt="${escapeHtml(die.type)}" title="${escapeHtml(die.type)}" style="height: 30px; width: 30px; vertical-align: middle; border: none;">
+            <strong style="text-shadow: black 0.5px 0.5px; margin-top: 4px;">${formulaForDisplay}</strong>
+            <a class="reroll-die" data-formula="${escapeHtml(die.formula)}" data-type="${escapeHtml(die.type)}" title="Reroll die!"
+              data-actor-id="${actor.id}"
+              data-mod="${mod}"
+              data-statmod="${statusMod}"
+              data-color="die-color-${escapeHtml(die.type)}"
+              data-modules='${escapeHtml(JSON.stringify(modules))}'
+              data-itemname="${escapeHtml(item.name)}"
+              style="width: 16px; height: 16px; color: black; margin-left: 8px; margin-top: 4px;">
+              <i class="fas fa-rotate-left"></i>
+            </a>
+            <a class="resolve-die"
+              title="Apply Die!"
+              data-payload='${escapeHtml(JSON.stringify(payload))}'
+              style="width: 16px; height: 16px; color: black; margin-left: 8px; margin-top: 4px;">
+              <i class="fas fa-bolt"></i>
+            </a>
+          </div>
+        </span>
+        ${moduleLine}
+      </div>
+    `;
+  }).join("");
+
+  const flavor = `
+    <div class="skill-roll-summary">
+      <h3>${escapeHtml(item.name)}</h3>
+      ${lightCostLine}
+      ${weightLine}
+      ${skillModulesLine}
+      <p><strong>Dice Rolled:</strong></p>
+      ${diceSummaries}
+      <hr>
+      <a class="toggle-roll-details" style="cursor: pointer; font-size: 12px; color: #888;">
+        ⯈ Show Roll Details
+      </a>
+    </div>
+  `;
+
+  let chatMessageId;
+  Hooks.once("renderChatMessage", (message, html) => {
+    if (message.id !== chatMessageId) return;
+
+    const diceRolls = html.find(".dice-roll");
+    if (!diceRolls.length) return;
+
+    const wrapper = $("<div class=\"roll-details-wrapper\" style=\"display: none;\"></div>");
+    diceRolls.wrapAll(wrapper);
+
+    const toggleLink = html.find(".toggle-roll-details");
+    toggleLink.on("click", () => {
+      const wasHidden = html.find(".roll-details-wrapper").is(":hidden");
+      html.find(".roll-details-wrapper").toggle();
+      toggleLink.html(wasHidden ? "⯆ Hide Roll Details" : "⯈ Show Roll Details");
+      toggleLink.toggleClass("open", wasHidden);
+    });
+  });
+
+  const validRolls = results.filter(result => result?.roll).map(result => result.roll);
+  const chatMessage = await ChatMessage.create({
+    speaker: ChatMessage.getSpeaker({ actor }),
+    flavor,
+    rolls: validRolls,
+    type: CONST.CHAT_MESSAGE_TYPES.ROLL,
+    rollMode: game.settings.get("core", "rollMode"),
+    sound: CONFIG.sounds.dice
+  });
+
+  chatMessageId = chatMessage.id;
+  return chatMessage;
+}
+
+async function sendIndividualSkillDieMessage(actor, item, result) {
+  const { die, roll, formulaForDisplay, mod, status_mod: statusMod } = result;
+  const modules = Object.values(die.mods ?? {});
+  const moduleLine = buildSkillDieModuleLine(modules);
+  const payload = buildSkillDiePayload(actor, item, die);
+  payload.total = roll.total;
+
+  const icon = `systems/sotc/assets/dice types/${die.type}.png`;
+  const colorClass = `die-color-${die.type}`;
+  const flavor = `
+    <div class="skill-die-roll">
+      <h3>${escapeHtml(item.name)}</h3>
+      <div style="margin-left:5px; margin-bottom:5px;">
+        <span class="${colorClass}" style="margin-left: 5px; vertical-align: middle; font-size: 16px;">
+          <div style="display: flex; gap: 4px;">
+            <img src="${icon}" alt="${escapeHtml(die.type)}" style="height: 30px; width: 30px; vertical-align: middle; border: none;">
+            <strong style="text-shadow: black 0.5px 0.5px; margin-top: 4px;">${formulaForDisplay}</strong>
+            <a class="reroll-die" data-formula="${escapeHtml(die.formula)}" data-type="${escapeHtml(die.type)}" title="Reroll this die"
+              data-actor-id="${actor.id}"
+              data-mod="${mod}"
+              data-statmod="${statusMod}"
+              data-color="die-color-${escapeHtml(die.type)}"
+              data-modules='${escapeHtml(JSON.stringify(modules))}'
+              data-itemname="${escapeHtml(item.name)}"
+              style="width: 16px; height: 16px; color: black; margin-left: 8px; margin-top: 4px;">
+              <i class="fas fa-rotate-left"></i>
+            </a>
+            <a class="resolve-die"
+              title="Apply Die!"
+              data-payload='${escapeHtml(JSON.stringify(payload))}'
+              style="width: 16px; height: 16px; color: black; margin-left: 8px; margin-top: 4px;">
+              <i class="fas fa-bolt"></i>
+            </a>
+          </div>
+        </span>
+        ${moduleLine}
+      </div>
+    </div>
+  `;
+
+  await roll.toMessage({
+    speaker: ChatMessage.getSpeaker({ actor }),
+    flavor,
+    rolls: [roll],
+    type: CONST.CHAT_MESSAGE_TYPES.ROLL,
+    rollMode: game.settings.get("core", "rollMode"),
+    sound: CONFIG.sounds.dice
+  });
+}
+
+async function handleSkillRollDialogFullRoll(app, root, actor, item) {
+  const dice = getSkillRollDialogDice(item);
+  const results = [];
+  let availableCharge = getActorChargeCount(actor);
+  let spentCharge = 0;
+
+  for (let index = 0; index < dice.length; index += 1) {
+    const die = dice[index];
+    const input = root.querySelector(`[data-die-index="${index}"]`);
+    if (!input) continue;
+
+    const result = await rollSkillDialogDie({
+      actor,
+      die,
+      input,
+      availableCharge
+    });
+
+    if (result.usedCharge) {
+      availableCharge -= 1;
+      spentCharge += 1;
+    }
+
+    results.push(result);
+  }
+
+  if (spentCharge > 0) {
+    await consumeActorCharge(actor, spentCharge);
+  }
+
+  await applySkillRollResourceCosts(actor, item);
+  await createSkillRollSummaryChatMessage(actor, item, results);
+  await app.close();
+}
+
+async function handleSkillRollDialogIndividualRoll(root, actor, item, index) {
+  const dice = getSkillRollDialogDice(item);
+  const die = dice[index];
+  if (!die) return;
+
+  const input = root.querySelector(`[data-die-index="${index}"]`);
+  if (!input) return;
+
+  const result = await rollSkillDialogDie({
+    actor,
+    die,
+    input,
+    availableCharge: getActorChargeCount(actor)
+  });
+
+  if (result.isError) {
+    ui.notifications.error(`Invalid formula: ${die.formula}`);
+    return;
+  }
+
+  if (result.usedCharge) {
+    await consumeActorCharge(actor, 1);
+    if (result.chargeInput) result.chargeInput.checked = false;
+    result.chargeIcon?.classList.remove("selected");
+  }
+
+  await sendIndividualSkillDieMessage(actor, item, result);
+}
+
+function bindSkillRollDialogChargeHandlers(app, html) {
+  const { root, container, actor, item } = resolveSkillRollDialogContext(app, html);
+  if (!isSkillRollDialogRoot(root) || !container || !actor || !item) return;
+
+  if (container.dataset.sbsChargeHandlersBound === "true") return;
+  container.dataset.sbsChargeHandlersBound = "true";
+
+  const fullRollButton = container.querySelector('.dialog-button[data-button="roll"], button[data-button="roll"]');
+  if (fullRollButton) {
+    fullRollButton.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void handleSkillRollDialogFullRoll(app, root, actor, item);
+    }, true);
+  }
+
+  for (const button of root.querySelectorAll(".dialog_individual_roll-button")) {
+    button.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const index = parseInt(button.dataset.index, 10);
+      if (Number.isNaN(index)) return;
+      void handleSkillRollDialogIndividualRoll(root, actor, item, index);
+    }, true);
+  }
+}
+
+function installSkillRollDialogContextCapture() {
+  const sheetClasses = getSkillRollDialogSheetClasses();
+  if (!sheetClasses.length) {
+    console.warn(`[${MODULE_ID}] Unable to find a SotC actor sheet class to patch for Charge roll dialogs.`);
+    return;
+  }
+
+  for (const sheetClass of sheetClasses) {
+    const prototype = sheetClass?.prototype;
+    if (!prototype || prototype._sbsChargeRollDialogPatched) continue;
+
+    const originalOnRollFullSkill = prototype._onRollFullSkill;
+    if (typeof originalOnRollFullSkill !== "function") continue;
+
+    prototype._sbsOriginalOnRollFullSkill = originalOnRollFullSkill;
+
+    prototype._onRollFullSkill = async function sbsOnRollFullSkill(event) {
+      event.preventDefault();
+
+      const button = event?.currentTarget;
+      const card = button?.closest?.(".skill_card");
+      const itemId = String(card?.dataset?.itemId ?? "").trim();
+      const item = itemId ? this.actor?.items?.get(itemId) ?? null : null;
+
+      if (!item) {
+        return ui.notifications.warn("Oh buddy, I don't know if this is worse than the other error. Your item is missing??? Tell me about it...");
+      }
+
+      return openPatchedSkillRollDialog(this.actor, item);
+    };
+
+    prototype._sbsChargeRollDialogPatched = true;
+  }
+}
+
+function isSkillRollDialogRoot(root) {
+  if (!root) return false;
+  if (!root.querySelector('.roll_dialog .roll_dialog_box[data-die-index]')) return false;
+  return Boolean(root.querySelector('.toggle_icon[data-type="poise"], .toggle_icon[data-type="paralysis"]'));
+}
+
+function decorateSkillRollDialogChargeToggle(html) {
+  const root = getRenderedHtmlRoot(html);
+  if (!isSkillRollDialogRoot(root)) return;
+
+  for (const rollBox of root.querySelectorAll('.roll_dialog_box[data-die-index]')) {
+    const index = String(rollBox.dataset.dieIndex ?? '').trim();
+    if (!index) continue;
+    if (rollBox.querySelector(`.toggle_icon[data-type="charge"][data-index="${index}"]`)) continue;
+
+    const referenceInput = rollBox.querySelector(`input[name="poise-${index}"], input[name="paralysis-${index}"]`);
+    const poiseIcon = rollBox.querySelector(`.toggle_icon[data-type="poise"][data-index="${index}"]`);
+    const referenceIcon = poiseIcon ?? rollBox.querySelector(`.toggle_icon[data-type="paralysis"][data-index="${index}"]`);
+    if (!referenceIcon) continue;
+
+    let chargeInput = rollBox.querySelector(`input[name="charge-${index}"]`);
+    if (!chargeInput) {
+      chargeInput = root.ownerDocument.createElement('input');
+      chargeInput.className = 'hidden_toggle';
+      chargeInput.type = 'checkbox';
+      chargeInput.name = `charge-${index}`;
+      chargeInput.id = `charge-${index}`;
+
+      if (referenceInput) {
+        referenceInput.insertAdjacentElement('afterend', chargeInput);
+      } else {
+        rollBox.insertBefore(chargeInput, referenceIcon);
+      }
+    }
+
+    const chargeIcon = referenceIcon.cloneNode(false);
+    chargeIcon.src = ROLL_DIALOG_CHARGE_ICON_PATH;
+    chargeIcon.dataset.type = 'charge';
+    chargeIcon.dataset.index = index;
+    chargeIcon.alt = 'Charge';
+    chargeIcon.title = 'Charge';
+    chargeIcon.classList.remove('selected');
+
+    chargeIcon.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const nextState = !chargeInput.checked;
+      chargeInput.checked = nextState;
+      chargeIcon.classList.toggle('selected', nextState);
+    });
+
+    referenceIcon.insertAdjacentElement('afterend', chargeIcon);
+  }
+}
+
+function scheduleSkillRollDialogChargeDecoration(app, html) {
+  if (app?._sbsHandledChargeRollDialog) return;
+
+  const root = getRenderedHtmlRoot(html);
+  if (!isSkillRollDialogRoot(root)) return;
+
+  decorateSkillRollDialogChargeToggle(html);
+  bindSkillRollDialogChargeHandlers(app, html);
+
+  requestAnimationFrame(() => {
+    const liveRoot = getRenderedHtmlRoot(html);
+    if (!liveRoot?.isConnected) return;
+    decorateSkillRollDialogChargeToggle(html);
+    bindSkillRollDialogChargeHandlers(app, html);
   });
 }
 
@@ -2421,7 +3265,23 @@ function getCustomBarAssignments(tokenCanvas) {
 }
 
 function shouldShowCustomBars(tokenCanvas) {
-  return Boolean(tokenCanvas?.hover || tokenCanvas?.controlled);
+  if (!tokenCanvas) return false;
+
+  if (tokenCanvas.hover || tokenCanvas.controlled) return true;
+
+  const displayBars = tokenCanvas?.document?.displayBars ?? tokenCanvas?.data?.displayBars;
+  if (displayBars === undefined || displayBars === null) return false;
+
+  const alwaysVisible = displayBars === CONST?.TOKEN_DISPLAY_MODES?.ALWAYS || displayBars === 0 || displayBars === "always";
+  if (alwaysVisible) return true;
+
+  const ownerVisible = displayBars === CONST?.TOKEN_DISPLAY_MODES?.OWNER || displayBars === 1 || displayBars === "owner";
+  if (ownerVisible) {
+    if (game.user?.isGM) return true;
+    return Boolean(tokenCanvas?.document?.actor?.permission?.get(game.user.id) >= CONST.DOCUMENT_OWNERSHIP_LEVELS.OWNER);
+  }
+
+  return false;
 }
 
 function syncCustomBarVisibility(tokenCanvas) {
@@ -2788,8 +3648,10 @@ function drawBarsOverToken(tokenCanvas) {
   const tokenSize = Math.max(tokenCanvas.w, tokenCanvas.h);
   const centerX = tokenCanvas.w / 2;
   const bgScale = (tokenSize * TOKEN_BAR_GEOMETRY.backgroundScale) / TOKEN_BAR_ASSET_W.background;
-  const bgWidth = TOKEN_BAR_ASSET_W.background * bgScale;
-  const bgHeight = TOKEN_BAR_ASSET_H.background * bgScale;
+  const bgScaleX = bgScale * (TOKEN_BAR_GEOMETRY.backgroundHorizontalStretch ?? 1);
+  const bgScaleY = bgScale;
+  const bgWidth = TOKEN_BAR_ASSET_W.background * bgScaleX;
+  const bgHeight = TOKEN_BAR_ASSET_H.background * bgScaleY;
   const overlayLift = bgHeight * TOKEN_BAR_GEOMETRY.overlayLiftY;
   const ringCenterY = tokenCanvas.h + (bgHeight * TOKEN_BAR_GEOMETRY.backgroundOffsetY) - overlayLift;
   const isVisible = shouldShowCustomBars(tokenCanvas);
@@ -2800,7 +3662,7 @@ function drawBarsOverToken(tokenCanvas) {
 
   const behind = new PIXI.Sprite(textures.tokenBarBehind);
   behind.anchor.set(0.5, 0.5);
-  behind.scale.set(bgScale);
+  behind.scale.set(bgScaleX, bgScaleY);
   behind.x = centerX;
   behind.y = ringCenterY;
   behind.zIndex = TOKEN_BAR_LAYER.behind;
@@ -2811,17 +3673,20 @@ function drawBarsOverToken(tokenCanvas) {
   // only show the lower half
   const bg = new PIXI.Sprite(textures.tokenBarBackground);
   bg.anchor.set(0.5, 0.5);
-  bg.scale.set(bgScale);
+  bg.scale.set(bgScaleX, bgScaleY);
   bg.x = centerX;
   bg.y = ringCenterY;
   bg.zIndex = TOKEN_BAR_LAYER.background;
   bg.visible = isVisible;
   const bgMaskLift = bgHeight * TOKEN_BAR_GEOMETRY.backgroundMaskLift;
+  const bgMaskTop = tokenCanvas.h - bgMaskLift - overlayLift;
+  const BG_MASK_LOWER_EXTEND_RATIO = 0.18; 
+  const extraLower = Math.round(bgHeight * BG_MASK_LOWER_EXTEND_RATIO);
   const bgMask = createRectMask(
     centerX - bgWidth / 2,
-    tokenCanvas.h - bgMaskLift - overlayLift,
+    bgMaskTop,
     bgWidth,
-    bgHeight / 2 + 2 + bgMaskLift
+    bgHeight / 2 + 2 + bgMaskLift + extraLower
   );
   bg.mask = bgMask;
   bgMask.zIndex = TOKEN_BAR_LAYER.backgroundMask;
@@ -2836,8 +3701,8 @@ function drawBarsOverToken(tokenCanvas) {
     const barData = assignment.snapshot ?? { value: 0, max: 1 };
     const ratio = getBarRatio(barData);
     const fillTexture = side === "health" ? textures.tokenBarHealth : textures.tokenBarStagger;
-    const fillScaleX = bgScale * TOKEN_BAR_GEOMETRY.fillScaleX;
-    const fillScaleY = bgScale * TOKEN_BAR_GEOMETRY.fillScaleY;
+    const fillScaleX = bgScaleX * TOKEN_BAR_GEOMETRY.fillScaleX;
+    const fillScaleY = bgScaleY * TOKEN_BAR_GEOMETRY.fillScaleY;
 
     if (ratio > 0) {
       const fill = new PIXI.Sprite(fillTexture);
@@ -3215,6 +4080,7 @@ function injectShowcaseStyles() {
 
     .sbs-inline-color-text {
       color: var(--sbs-inline-color, inherit);
+      text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.9);
     }
 
     .sbs-inline-color-marker {
@@ -3360,7 +4226,7 @@ function injectShowcaseStyles() {
       bottom: 4%;
     }
     .sbs-chat-showcase-preview__body .sbs-skill-showcase .sbs-skill-showcase-description {
-      bottom: 12%;
+      bottom: 4%;
       height: 18%;
     }
     .sbs-chat-showcase-preview__body .sbs-skill-showcase .sbs-skill-showcase-mods {
@@ -3385,6 +4251,12 @@ function injectShowcaseStyles() {
     }
     .sbs-chat-showcase-preview__body .sbs-skill-showcase .sbs-skill-showcase-die {
       gap: 6px;
+    }
+
+    /* Reveal-sheet specific: lower the description so revealed cards sit visually lower */
+    .sbs-reveal-showcase-entry .sbs-skill-showcase .sbs-skill-showcase-description {
+      bottom: 4%;
+      height: 18%;
     }
 
     .sbs-reveal-showcase-list {
@@ -3674,7 +4546,8 @@ function injectShowcaseStyles() {
       white-space: nowrap;
     }
 
-    .sbs-cutscene-list-meta,
+    .sbs-cutscene-list-meta,tokenBarBehindstagger
+
     .sbs-cutscene-status,
     .sbs-cutscene-caption,
     .sbs-cutscene-path {
@@ -4448,6 +5321,7 @@ function makeSkillShowcase(item) {
   const fallbackArt = "systems/sotc/assets/Raw Ruina Assets/Pages/default skill icon.png";
   const statusSource = item?.parent ?? item?.actor ?? null;
   const art = item.img && item.img !== "icons/svg/item-bag.svg" ? item.img : fallbackArt;
+  const artSrc = escapeHtml(art);
   const borderStyle = item.system?.border_style || (item.type === "ego" ? "ego" : "paperback");
   const borderImage = `systems/sotc/assets/sheets/skills/borders/${borderStyle}.png`;
   const weightIcon = item.system?.weight > 1
@@ -4475,7 +5349,7 @@ function makeSkillShowcase(item) {
         ${weight > 1 ? `<div class="sbs-skill-showcase-weight">${weight}</div>` : ""}
         <div class="sbs-skill-showcase-name">${titleSafe}</div>
         <div class="sbs-skill-showcase-art-frame">
-          <img class="sbs-skill-showcase-art" src="${art}" alt="${titleSafe}" title="${titleSafe}">
+          <img class="sbs-skill-showcase-art" src="${artSrc}" alt="${titleSafe}" title="${titleSafe}">
         </div>
         ${emotionCost > 0 ? `<img class="sbs-skill-showcase-emotion-icon" src="systems/sotc/assets/sheets/skills/SkillEmotionIcon.png" alt="Emotion cost">` : ""}
         ${emotionCost > 0 ? `<div class="sbs-skill-showcase-emotion">${emotionCost}</div>` : ""}
@@ -4642,8 +5516,11 @@ function enhanceSkillChatMessage(message, html) {
 Hooks.on("renderChatMessage", enhanceSkillChatMessage);
 Hooks.on("renderActorSheet", attachActorSheetRevealToggles);
 Hooks.on("renderSotCActorSheet", attachActorSheetRevealToggles);
+Hooks.on("renderActorSheet", captureSkillRollDialogContextFromActorSheet);
+Hooks.on("renderSotCActorSheet", captureSkillRollDialogContextFromActorSheet);
 Hooks.on("renderItemSheet", scheduleSkillStatusDecoration);
 Hooks.on("renderSotCSkillSheet", scheduleSkillStatusDecoration);
+Hooks.on("renderDialog", scheduleSkillRollDialogChargeDecoration);
 Hooks.on("renderApplication", scheduleSkillStatusDecoration);
 Hooks.on("getSceneControlButtons", installCutsceneSceneControls);
 Hooks.on("updateActor", (actor, changes) => {
